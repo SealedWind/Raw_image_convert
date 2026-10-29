@@ -1,11 +1,18 @@
 """
-bit depth:10
-resolution: 4224*3024
 注意：
-使用byteswap()而不是newbyteorder()，因为后者数组没有在内存中更改
-png转raw可选择不交换字节序
+完整的raw处理至少要考虑:
+1.每像素位深（8/10/12/14/16）与容器格式（unpacked 16-bit / packed RAW10/12 / 8-bit）
+2.字节序（little / big endian）
+3.对齐方式（低位对齐 LSB-aligned / 高位对齐 MSB-aligned）
+4.通道布局（单通道灰度 / Bayer pattern / planar RGB / packed RGB）
+5.header 长度 / 数据偏移
+6.行 stride（是否含 padding）
+7.缩放策略（归一化到 16-bit 的移位量应由位深推导：shift = 16 - bitdepth，MSB 对齐时 shift=0）
+
+此程序处理的raw，每像素占用两字节，位深为10bit，字节序为小端，对齐方式为LSB，bayer阵列为RGGB，无header
 读取png时，头文件( IHDR 块)已经包含宽、高、通道数、像素位深、字节序等信息，不需要像 raw 格式那样另外指定
-完全用 NumPy 做裁剪和修改，最后只用 PIL 保存
+raw_to_png 保存的是单通道 16-bit 的PNG——raw_to_png 与 png_to_raw 两个函数互不正逆
+png_to_raw 只能应对灰度图与RGB/RGBA的PNG
 """
 from PIL import Image, ImageDraw
 import numpy as np
@@ -27,15 +34,14 @@ def raw_to_png(input_filename, width, height, output_pngname):
     # data1 = np.frombuffer(raw_data, dtype='>u2')   # 明确指定大端'<u2'
     # data2 = np.frombuffer(raw_data, dtype='<u2')   # 明确指定小端'<u2'
     print(data.dtype.byteorder)  # 查看端序
-    # data = data.byteswap() # 如果raw原本是小端，由于读取默认是小端，需交换回大端序才能保存正常的png
+    # data = data.byteswap() # 如果raw原本是大端，由于读取默认是小端，需交换回大端序
     # 检查是否某些bit从未使用(确定位深)
     # for bit in range(16):
     #     bit_set = (data >> bit) & 1
     #     print(f"Bit {bit:2d}: {bit_set.sum()} / {len(data)} pixels set")
     data = data.reshape(height, width)
-    # 确保数据范围为 uint16
-    # 如果数据是10位数据，需左移6位，缩放为int16，相当于65535*value/(2^10)
-    # 需要根据前面打印的位深信息来修改
+    # 缩放策略（归一化到 16-bit 的移位量由前面打印的位深信息推导：shift = 16 - bitdepth；MSB 对齐时 shift=0）
+    # 此处假设数据是10位，需左移6位，缩放为int16，相当于65535*value/(2^10)    
     data_16bit = data << 6 
     cv2.imwrite(output_pngname, data_16bit )
 
@@ -45,30 +51,41 @@ def png_to_raw(png_path, raw_output_path):
         1. 读取16位大端序PNG
         2. 转换为numpy数组
         3. 移除单通道维度
-        4. 转换为小端序字节流
+        4. 保存为为16bit小端序字节流
         5. 写入二进制文件
     """
     # 读取16位大端序图像
     img = Image.open(png_path)
-    # 转换为numpy数组，取三通道平均
     img_array = np.array(img)  # shape=(height, width)
-    gray_array = img_array.mean(axis=2)
-    # 确保数据是uint16类型
-    if gray_array.dtype != np.uint16:
-        arr = (gray_array.astype(np.uint16) * 257)  # 255 → 65535 映射（65535=257*255）
+    if img_array.ndim == 2: # 灰度图
+        arr = img_array
+    elif img_array.ndim == 3: # RGBA or RGB 取第一个通道
+        gray = img_array[..., 0]
+        if gray.dtype == np.uint8:
+            # 8-bit → 16-bit：先放大再取整（255*257=65535）
+            arr = gray.astype(np.uint16) * 257
+        elif gray.dtype == np.uint16:
+            arr = gray
+        elif gray.dtype == np.int32:
+            arr = np.clip(gray, 0, 65535).astype(np.uint16)
+        else:
+            # float32/64 等：先取整再截断，避免向下截断和负数回绕
+            arr = np.clip(np.round(gray.astype(np.float64)), 0, 65535).astype(np.uint16)
     else:
-        arr = gray_array
-    arr.astype('<u2').tofile(raw_output_path)
+        print("unsupported type of png")
+        return
+    arr.astype('<u2').tofile(raw_output_path) # 保存为小端序
     print(f"成功转换 {os.path.basename(png_path)} 为RAW格式")
 
 if __name__== "__main__":
+    # raw_folder = input('please input png/raw folder path:\n')
     png_folder = input('please input png/raw folder path:\n')
     width = int(input('please input raw image width:\n'))
     height = int(input('please input raw image height:\n'))    
     raw_folder = r'D:\...\ConverterFolder'
     width = 4224
     height = 3024
-    convert_mode = 'raw2png'
+    convert_mode = 'png2raw'
     if convert_mode == 'png2raw':
         for filename in os.listdir(png_folder):
             # 检查文件扩展名是否为.png
